@@ -1,307 +1,128 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
-import os
 import io
-from datetime import date, datetime, timedelta
+from datetime import datetime
 
-# ── Page config ──────────────────────────────────────────────────────────────
+# ── 페이지 설정 ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Coupon Generator | 롯데백화점몰",
-    page_icon="🎫",
+    page_title="롯데온 Pro | 쿠폰 대량 업로드 시스템",
+    page_icon="🎟️",
     layout="wide",
 )
 
-# ── DB setup (in-memory demo) ─────────────────────────────────────────────────
-DB_PATH = "coupon_generator.db"
+# ── 데이터 로드 ──────────────────────────────────────────────────────────
+@st.cache_data
+def load_data():
+    try:
+        # 파일명을 'dummy_data.csv'로 가정 (사용자 업로드 파일 기반)
+        df = pd.read_csv('./dummy_data.csv')
+        
+        # 요구사항 ①: MD 및 상품군 컬럼이 없을 경우를 대비한 가상 데이터 생성 로직
+        if 'MD' not in df.columns:
+            df['MD'] = '미지정'
+        if '상품군' not in df.columns:
+            df['상품군'] = '미지정'
+            
+        return df
+    except FileNotFoundError:
+        st.error("데이터 파일(dummy_data.csv)을 찾을 수 없습니다. 파일 경로를 확인해주세요.")
+        return pd.DataFrame()
 
-def init_db():
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.executescript("""
-        CREATE TABLE IF NOT EXISTS products (
-            pid         TEXT PRIMARY KEY,
-            brand       TEXT NOT NULL,
-            product_name TEXT NOT NULL,
-            status      TEXT NOT NULL,   -- ON_SALE / HIDDEN
-            price       INTEGER NOT NULL,
-            registered_at DATE NOT NULL
-        );
+df_master = load_data()
 
-        CREATE TABLE IF NOT EXISTS coupon_history (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            campaign_name TEXT NOT NULL,
-            brand       TEXT NOT NULL,
-            discount_rate INTEGER NOT NULL,
-            start_date  DATE NOT NULL,
-            end_date    DATE NOT NULL,
-            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-            pid_count   INTEGER NOT NULL
-        );
-    """)
-    # Seed demo data if empty
-    if cur.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 0:
-        import random
-        brands = ["나이키", "아디다스", "폴로", "타미힐피거", "MLB"]
-        statuses = ["ON_SALE"] * 4 + ["HIDDEN"]
-        rows = []
-        for b in brands:
-            for i in range(1, 21):
-                pid = f"{b[:2].upper()}{i:04d}"
-                rows.append((
-                    pid, b, f"{b} 상품 {i:02d}", random.choice(statuses),
-                    random.randint(30000, 300000) // 1000 * 1000,
-                    str(date.today() - timedelta(days=random.randint(0, 200)))
-                ))
-        cur.executemany(
-            "INSERT OR IGNORE INTO products VALUES (?,?,?,?,?,?)", rows
-        )
-    con.commit()
-    con.close()
+# ── 사이드바 필터 (요구사항 ① 반영) ─────────────────────────────────────────────
+st.sidebar.header("🔍 상품 검색 필터")
 
-init_db()
+if not df_master.empty:
+    # 5가지 필터 정의
+    stores = st.sidebar.multiselect("점포(상위거래처) 선택", options=sorted(df_master['상위거래처'].unique()))
+    brands = st.sidebar.multiselect("브랜드 선택", options=sorted(df_master['브랜드명'].unique()))
+    mds = st.sidebar.multiselect("MD 선택", options=sorted(df_master['MD'].unique()))
+    categories = st.sidebar.multiselect("상품군 선택", options=sorted(df_master['상품군'].unique()))
+    statuses = st.sidebar.multiselect("상품 상태 선택", options=sorted(df_master['상태'].unique()))
 
-def get_brands():
-    con = sqlite3.connect(DB_PATH)
-    brands = [r[0] for r in con.execute(
-        "SELECT DISTINCT brand FROM products ORDER BY brand").fetchall()]
-    con.close()
-    return brands
+    # 필터링 로직: 선택하지 않은 경우(리스트가 비어있을 때) 전체 선택으로 인식
+    filtered_df = df_master.copy()
+    if stores:
+        filtered_df = filtered_df[filtered_df['상위거래처'].isin(stores)]
+    if brands:
+        filtered_df = filtered_df[filtered_df['브랜드명'].isin(brands)]
+    if mds:
+        filtered_df = filtered_df[filtered_df['MD'].isin(mds)]
+    if categories:
+        filtered_df = filtered_df[filtered_df['상품군'].isin(categories)]
+    if statuses:
+        filtered_df = filtered_df[filtered_df['상태'].isin(statuses)]
+else:
+    filtered_df = pd.DataFrame()
 
-def fetch_products(brand: str) -> pd.DataFrame:
-    con = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(
-        "SELECT pid, product_name, price, status, registered_at "
-        "FROM products WHERE brand=? AND status='ON_SALE'",
-        con, params=(brand,)
-    )
-    con.close()
-    return df
+# ── 메인 화면 ─────────────────────────────────────────────────────────────────
+st.title("🎟️ 쿠폰 대량 업로드 설정")
 
-def get_history() -> pd.DataFrame:
-    con = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query(
-        "SELECT id, campaign_name, brand, discount_rate, start_date, end_date, "
-        "created_at, pid_count FROM coupon_history ORDER BY id DESC LIMIT 50",
-        con
-    )
-    con.close()
-    return df
-
-def save_history(campaign_name, brand, discount_rate, start_date, end_date, pid_count):
-    con = sqlite3.connect(DB_PATH)
-    con.execute(
-        "INSERT INTO coupon_history "
-        "(campaign_name, brand, discount_rate, start_date, end_date, pid_count) "
-        "VALUES (?,?,?,?,?,?)",
-        (campaign_name, brand, discount_rate,
-         str(start_date), str(end_date), pid_count)
-    )
-    con.commit()
-    con.close()
-
-# ── Validation logic ──────────────────────────────────────────────────────────
-def validate_100_day_rule(products_df: pd.DataFrame, start_date: date) -> pd.DataFrame:
-    """Flag products registered within 100 days of start_date."""
-    df = products_df.copy()
-    df["registered_at"] = pd.to_datetime(df["registered_at"]).dt.date
-    df["days_since_reg"] = (start_date - df["registered_at"]).apply(lambda x: x.days)
-    df["100일_룰_위반"] = df["days_since_reg"] < 100
-    return df
-
-def build_csv(df: pd.DataFrame, campaign_name: str,
-              discount_rate: int, start_date: date, end_date: date) -> bytes:
-    """Generate Lotte ON SO upload-format CSV."""
-    out = df[~df["100일_룰_위반"]].copy()
-    out = out.rename(columns={"pid": "상품ID", "product_name": "상품명", "price": "판매가"})
-    out["행사명"] = campaign_name
-    out["할인율(%)"] = discount_rate
-    out["쿠폰시작일"] = start_date.strftime("%Y%m%d")
-    out["쿠폰종료일"] = end_date.strftime("%Y%m%d")
-    cols = ["상품ID", "상품명", "판매가", "행사명", "할인율(%)", "쿠폰시작일", "쿠폰종료일"]
-    return out[cols].to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
-
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-st.sidebar.image(
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/0/0d/Lotte_Department_Store_logo.svg/200px-Lotte_Department_Store_logo.svg.png",
-    width=160,
-)
-st.sidebar.title("Coupon Generator")
-st.sidebar.caption("롯데백화점몰 AMD 전용")
-menu = st.sidebar.radio(
-    "메뉴",
-    ["🎫 쿠폰 생성", "📋 등록 이력", "🗄️ 상품 데이터 마트"],
-    index=0,
-)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 1 – 쿠폰 생성
-# ═══════════════════════════════════════════════════════════════════════════════
-if menu == "🎫 쿠폰 생성":
-    st.title("🎫 쿠폰 생성")
-    st.caption("7가지 필수 항목을 입력하면 업로드용 CSV가 자동 생성됩니다.")
-
-    # ── Step 1: 사용자 입력 ──────────────────────────────────────────────────
-    with st.expander("📝 STEP 1 · 기초 정보 입력", expanded=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            brand = st.selectbox("① 브랜드 *", get_brands())
-            campaign_name = st.text_input("② 행사명 *", placeholder="예) 나이키 여름 시즌오프")
-            discount_rate = st.number_input(
-                "③ 할인율 (%) *", min_value=1, max_value=80, value=10, step=1
-            )
-            min_price = st.number_input(
-                "④ 최소 적용 금액 (원)", min_value=0, value=0, step=10000
-            )
-        with col2:
-            start_date = st.date_input("⑤ 쿠폰 시작일 *", value=date.today())
-            end_date = st.date_input(
-                "⑥ 쿠폰 종료일 *",
-                value=date.today() + timedelta(days=30),
-                min_value=start_date,
-            )
-            include_hidden = st.checkbox("⑦ 전시 중단 상품 포함", value=False)
-
-    # ── Step 2: 지능형 탐색 ─────────────────────────────────────────────────
-    if st.button("🔍 STEP 2 · 상품 자동 탐색", type="primary", use_container_width=True):
-        with st.spinner("DB에서 판매 중인 최신 상품 리스트(PID) 추출 중…"):
-            products = fetch_products(brand)
-            if include_hidden:
-                con = sqlite3.connect(DB_PATH)
-                products = pd.read_sql_query(
-                    "SELECT pid, product_name, price, status, registered_at "
-                    "FROM products WHERE brand=?", con, params=(brand,)
-                )
-                con.close()
-
-            if min_price > 0:
-                products = products[products["price"] >= min_price]
-
-        st.session_state["products"] = products
-        st.session_state["search_done"] = True
-
-    if st.session_state.get("search_done"):
-        products = st.session_state["products"]
-        st.success(f"✅ {brand} 판매 상품 {len(products)}개 추출 완료")
-
-        # ── Step 3: 자동 검증 ──────────────────────────────────────────────
-        with st.expander("🔎 STEP 3 · 자동 검증 결과", expanded=True):
-            validated = validate_100_day_rule(products, start_date)
-            pass_df = validated[~validated["100일_룰_위반"]]
-            fail_df = validated[validated["100일_룰_위반"]]
-
-            c1, c2, c3 = st.columns(3)
-            c1.metric("전체 상품", len(validated))
-            c2.metric("✅ 등록 가능", len(pass_df), delta=None)
-            c3.metric("❌ 100일 룰 위반", len(fail_df),
-                      delta=f"-{len(fail_df)}" if len(fail_df) else None,
-                      delta_color="inverse")
-
-            if not fail_df.empty:
-                st.warning(f"⚠️ {len(fail_df)}개 상품이 100일 룰로 제외됩니다.")
-                with st.expander("제외 상품 목록 보기"):
-                    st.dataframe(
-                        fail_df[["pid", "product_name", "price", "days_since_reg"]],
-                        use_container_width=True,
-                    )
-
-            if start_date >= end_date:
-                st.error("❌ 종료일이 시작일보다 앞설 수 없습니다.")
-
-            if not campaign_name.strip():
-                st.error("❌ 행사명이 비어 있습니다.")
-
-        # ── Step 4: 파일 생성 ──────────────────────────────────────────────
-        st.subheader("📄 STEP 4 · CSV 파일 생성")
-        if pass_df.empty:
-            st.error("등록 가능한 상품이 없어 파일을 생성할 수 없습니다.")
-        elif not campaign_name.strip() or start_date >= end_date:
-            st.warning("입력 항목을 다시 확인해주세요.")
-        else:
-            csv_bytes = build_csv(pass_df, campaign_name, discount_rate, start_date, end_date)
-            filename = f"coupon_{brand}_{start_date.strftime('%Y%m%d')}.csv"
-
-            st.download_button(
-                label=f"⬇️ CSV 다운로드 ({len(pass_df)}개 상품)",
-                data=csv_bytes,
-                file_name=filename,
-                mime="text/csv",
-                type="primary",
-                use_container_width=True,
-            )
-
-            # Preview
-            with st.expander("미리보기 (상위 10행)"):
-                preview = pd.read_csv(io.BytesIO(csv_bytes), encoding="utf-8-sig")
-                st.dataframe(preview.head(10), use_container_width=True)
-
-            if st.button("💾 이력 저장", use_container_width=True):
-                save_history(
-                    campaign_name, brand, discount_rate,
-                    start_date, end_date, len(pass_df)
-                )
-                st.success("이력이 저장되었습니다.")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 2 – 등록 이력
-# ═══════════════════════════════════════════════════════════════════════════════
-elif menu == "📋 등록 이력":
-    st.title("📋 쿠폰 등록 이력")
-    hist = get_history()
-    if hist.empty:
-        st.info("아직 저장된 이력이 없습니다. 쿠폰을 생성한 뒤 이력 저장을 눌러주세요.")
-    else:
-        # Expiry warning: flag coupons ending within 7 days
-        hist["end_date"] = pd.to_datetime(hist["end_date"]).dt.date
-        hist["만료_임박"] = hist["end_date"].apply(
-            lambda d: "⚠️ 만료 임박" if d - date.today() <= timedelta(days=7) else ""
-        )
-        st.dataframe(
-            hist[["id", "campaign_name", "brand", "discount_rate",
-                  "start_date", "end_date", "pid_count", "만료_임박", "created_at"]],
-            use_container_width=True,
-        )
-
-        # 100-day expiry monitor
-        st.subheader("⏰ 100일 만료 모니터")
-        st.caption("종료일 기준으로 7일 이내 만료되는 캠페인을 자동으로 탐지합니다.")
-        expiring = hist[hist["만료_임박"] != ""]
-        if expiring.empty:
-            st.success("현재 만료 임박 캠페인 없음")
-        else:
-            st.warning(f"{len(expiring)}개 캠페인이 곧 만료됩니다. 쿠폰 연장을 검토하세요.")
-            st.dataframe(expiring, use_container_width=True)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE 3 – 상품 데이터 마트
-# ═══════════════════════════════════════════════════════════════════════════════
-elif menu == "🗄️ 상품 데이터 마트":
-    st.title("🗄️ 상품 데이터 마트")
-    st.caption("브랜드별 최신 판매/전시 상태를 확인합니다.")
-
-    con = sqlite3.connect(DB_PATH)
-    all_df = pd.read_sql_query(
-        "SELECT brand, status, COUNT(*) as cnt FROM products GROUP BY brand, status ORDER BY brand",
-        con
-    )
-    full_df = pd.read_sql_query("SELECT * FROM products ORDER BY brand, pid", con)
-    con.close()
-
-    # Summary metrics
-    total = len(full_df)
-    on_sale = len(full_df[full_df["status"] == "ON_SALE"])
+with st.container():
     col1, col2, col3 = st.columns(3)
-    col1.metric("전체 상품", total)
-    col2.metric("판매 중", on_sale)
-    col3.metric("전시 중단", total - on_sale)
+    
+    with col1:
+        # 요구사항 ②: 매장범위 매칭
+        range_map = {"전체": "A", "본매장": "M", "제휴채널": "O"}
+        selected_range_label = st.selectbox("매장범위 선택", options=list(range_map.keys()))
+        shop_range = range_map[selected_range_label]
+        
+        # 요구사항 ③: 할인유형 매칭
+        type_map = {"정률": "10", "정액": "20"}
+        selected_type_label = st.selectbox("할인유형 선택", options=list(type_map.keys()))
+        type_code = type_map[selected_type_label]
 
-    # Brand breakdown chart
-    pivot = all_df.pivot_table(index="brand", columns="status", values="cnt", fill_value=0)
-    st.bar_chart(pivot)
+    with col2:
+        start_date = st.date_input("행사 시작일", value=datetime.now())
+        end_date = st.date_input("행사 종료일", value=datetime.now())
+        discount_val = st.number_input("할인액/율 입력", min_value=0, value=0)
 
-    # Full table with filter
-    selected_brand = st.selectbox("브랜드 필터", ["전체"] + get_brands())
-    view_df = full_df if selected_brand == "전체" else full_df[full_df["brand"] == selected_brand]
-    st.dataframe(view_df, use_container_width=True)
+    with col3:
+        # 요구사항 ④: 분담율 설정 (기본값 0)
+        v_share = st.number_input("거래처 분담율 (%)", min_value=0, max_value=100, value=0)
+        p_share = st.number_input("제휴사 분담율 (%)", min_value=0, max_value=100, value=0)
+        
+        # 요구사항 ⑤: 사용요일 선택 (기본값 전체 선택)
+        days_list = ["월", "화", "수", "목", "금", "토", "일"]
+        selected_days = st.multiselect("사용요일 선택", options=days_list, default=days_list)
+        
+        # O/X 문자열 변환 로직 (월~일 순서)
+        usage_days_str = "".join(["O" if day in selected_days else "X" for day in days_list])
+
+# ── 데이터 처리 및 다운로드 ───────────────────────────────────────────────────
+st.divider()
+st.subheader(f"📊 대상 상품 목록 (총 {len(filtered_df)}건)")
+st.dataframe(filtered_df, use_container_width=True)
+
+if st.button("🚀 업로드용 파일 생성", type="primary"):
+    if filtered_df.empty:
+        st.warning("필터링된 상품이 없습니다.")
+    else:
+        # 양식에 맞춘 데이터프레임 구성
+        upload_df = pd.DataFrame()
+        upload_df['상품번호'] = filtered_df['상품번호']
+        upload_df['매장범위'] = shop_range
+        upload_df['행사시작일'] = start_date.strftime('%Y%m%d') + "0000"
+        upload_df['행사종료일'] = end_date.strftime('%Y%m%d') + "2359"
+        upload_df['할인유형'] = type_code
+        upload_df['할인액'] = discount_val
+        upload_df['거래처분담율'] = v_share
+        upload_df['제휴사분담율'] = p_share
+        upload_df['사용요일'] = usage_days_str # 요구사항 ⑤ 결과값
+        upload_df['시작시간'] = "0000"
+        upload_df['종료시간'] = "2359"
+        upload_df['요일/시간 할인율'] = ""
+
+        # 엑셀 파일로 변환
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            upload_df.to_excel(writer, index=False, sheet_name='Sheet1')
+        
+        st.success(f"총 {len(upload_df)}건의 파일이 생성되었습니다!")
+        st.download_button(
+            label="📥 엑셀 파일 다운로드",
+            data=output.getvalue(),
+            file_name=f"coupon_upload_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
