@@ -15,7 +15,7 @@ st.set_page_config(
 def load_data():
     try:
         # 파일명을 'dummy_data.csv'로 가정 (사용자 업로드 파일 기반)
-        df = pd.read_csv('./dummy_data.csv')
+        df = pd.read_csv('dummy_data.csv')
         
         # 요구사항 ①: MD 및 상품군 컬럼이 없을 경우를 대비한 가상 데이터 생성 로직
         if 'MD' not in df.columns:
