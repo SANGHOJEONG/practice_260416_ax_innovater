@@ -6,7 +6,7 @@ from datetime import datetime
 # ── 페이지 설정 ───────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="롯데온 Pro | 쿠폰 대량 업로드 시스템",
-    page_icon="🎟️",
+    page_icon="🎟️"
     layout="wide",
 )
 
